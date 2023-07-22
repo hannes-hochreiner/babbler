@@ -1,37 +1,27 @@
-use anyhow::{ensure, Result};
-use serde::{Deserialize, Serialize};
-use std::process::Stdio;
+use anyhow::{ensure, Context, Result};
+use std::{collections::BTreeMap, env, process::Stdio};
 use tokio::{
     io::{self, AsyncReadExt, AsyncWriteExt},
     process::Command,
 };
 
-#[derive(Serialize, Deserialize)]
-struct Input {
-    filename: String,
-    password: String,
-    commands: Vec<KeyValue>,
-}
-
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
-struct KeyValue {
-    key: String,
-    value: String,
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
+    let password = env::var("BABBLER_PASSWORD")
+        .context("could not read \"BABBLER_PASSWORD\" environment variable")?;
+    let filename = env::var("BABBLER_FILENAME")
+        .context("could not read \"BABBLER_FILENAME\" environment variable")?;
     let mut input_string = String::new();
 
     io::stdin().read_to_string(&mut input_string).await?;
 
-    let input = serde_json::from_str::<Input>(&input_string)?;
+    let input = serde_json::from_str::<BTreeMap<String, String>>(&input_string)?;
 
     let mut cmd = Command::new("keepassxc-cli");
 
     cmd.stdout(Stdio::piped());
     cmd.stdin(Stdio::piped());
-    cmd.args(&["open", "-q", &input.filename]);
+    cmd.args(&["open", "-q", &filename]);
 
     let mut child = cmd.spawn().expect("failed to spawn command");
     let mut stdin = child
@@ -44,7 +34,7 @@ async fn main() -> Result<()> {
         .expect("child did not have a handle to stdout");
 
     stdin
-        .write_all(format!("{}\n", input.password).as_bytes())
+        .write_all(format!("{}\n", &password).as_bytes())
         .await
         .expect("could not write to stdin");
 
@@ -56,9 +46,8 @@ async fn main() -> Result<()> {
             format!(
                 "{}\nquit\n",
                 input
-                    .commands
                     .iter()
-                    .map(|elem| elem.value.as_str())
+                    .map(|(_, value)| value.as_str())
                     .collect::<Vec<&str>>()
                     .join("\n")
             )
@@ -68,7 +57,7 @@ async fn main() -> Result<()> {
         .expect("could not write to stdin");
     stdout.read_to_string(&mut stdout_string).await.unwrap();
 
-    let output = parse_output(&prompt, &input.commands, &stdout_string)?;
+    let output = parse_output(&prompt, &input, &stdout_string)?;
 
     io::stdout()
         .write_all(serde_json::to_string(&output)?.as_bytes())
@@ -83,17 +72,21 @@ async fn read<T: AsyncReadExt + std::marker::Unpin>(stdfd: &mut T) -> Result<Str
     Ok(String::from_utf8(buffer[..len].to_vec())?)
 }
 
-fn parse_output(prompt: &str, input: &Vec<KeyValue>, stdout_string: &str) -> Result<Vec<KeyValue>> {
-    let mut output = Vec::new();
+fn parse_output(
+    prompt: &str,
+    input: &BTreeMap<String, String>,
+    stdout_string: &str,
+) -> Result<BTreeMap<String, String>> {
+    let mut output = BTreeMap::new();
     let mut stdout_lines = stdout_string.lines();
     let mut current_line = stdout_lines.next();
 
-    for kv in input {
+    for (key, value) in input {
         ensure!(
-            format!("{}{}", prompt, kv.value)
+            format!("{}{}", prompt, value)
                 == current_line.ok_or(anyhow::anyhow!("expected line"))?,
             "\"{}\" == \"{}\"",
-            format!("{}{}", prompt, kv.value),
+            format!("{}{}", prompt, value),
             current_line.ok_or(anyhow::anyhow!("expected line"))?
         );
         let mut collector = Vec::<String>::new();
@@ -111,10 +104,7 @@ fn parse_output(prompt: &str, input: &Vec<KeyValue>, stdout_string: &str) -> Res
 
         ensure!(collector.len() > 0);
 
-        output.push(KeyValue {
-            key: kv.key.clone(),
-            value: collector.join("\n"),
-        });
+        output.insert(key.clone(), collector.join("\n"));
     }
 
     Ok(output)
@@ -126,35 +116,22 @@ mod tests {
 
     #[test]
     fn parse_output_1() {
-        let input = Input {
-            filename: "testfile".to_string(),
-            password: "test123".to_string(),
-            commands: vec![
-                KeyValue {
-                    key: "ls".to_string(),
-                    value: "ls".to_string(),
-                },
-                KeyValue {
-                    key: "test".to_string(),
-                    value: "show -sa password \"Test/test credential\"".to_string(),
-                },
-            ],
-        };
+        let input = BTreeMap::from([
+            ("ls".to_string(), "ls".to_string()),
+            (
+                "test".to_string(),
+                "show -sa password \"Test/test credential\"".to_string(),
+            ),
+        ]);
         let stdout = "TestDB> ls\nTest/\nTestDB> show -sa password \"Test/test credential\"\n27C9vkiE9ZO6oBoD37Cx\nTestDB> quit\n";
         let prompt = "TestDB> ";
 
         assert_eq!(
-            parse_output(prompt, &input.commands, stdout).unwrap(),
-            vec![
-                KeyValue {
-                    key: "ls".to_string(),
-                    value: "Test/".to_string()
-                },
-                KeyValue {
-                    key: "test".to_string(),
-                    value: "27C9vkiE9ZO6oBoD37Cx".to_string()
-                }
-            ]
+            parse_output(prompt, &input, stdout).unwrap(),
+            BTreeMap::from([
+                ("ls".to_string(), "Test/".to_string()),
+                ("test".to_string(), "27C9vkiE9ZO6oBoD37Cx".to_string())
+            ])
         );
     }
 }
