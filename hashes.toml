@@ -1,0 +1,8 @@
+deps = "sha256-bAuUI/PCI6HinTtPOQUHsDphNaHoLCDWw83rCp+J3As="
+cargo_config = '''
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "/tmp/babbler_deps_1a9eba42-01b5-4368-9be5-31729d77b10d"'''
+cargo_lock = "2820536ece0f0039a35196a76127d8713e713211ea4c63c12876288c35ccb5d0"
